@@ -1299,3 +1299,73 @@ func trimSliceSpace(s []string) []string {
 	}
 	return s
 }
+
+func TestRowsColumnsWithTypes(t *testing.T) {
+	// Build a worksheet covering all cell type families
+	f := NewFile()
+	f.Sheet.Delete("xl/worksheets/sheet1.xml")
+	f.Pkg.Store("xl/worksheets/sheet1.xml", fmt.Appendf(nil, `<worksheet xmlns="%s"><sheetData>`+
+		`<row r="1">`+
+		`<c r="A1" t="b"><v>1</v></c>`+
+		`<c r="B1" t="d"><v>2026-11-14T00:00:00Z</v></c>`+
+		`<c r="C1" t="n"><v>42</v></c>`+
+		`<c r="D1" t="e"><v>#DIV/0!</v></c>`+
+		`<c r="E1" t="s"><v>0</v></c>`+
+		`<c r="F1" t="str"><f>1+1</f><v>2</v></c>`+
+		`<c r="G1" t="inlineStr"><is><t>inline</t></is></c>`+
+		`<c r="H1"><v>3.14</v></c>`+
+		`</row>`+
+		`<row r="2"><c r="C2" t="s"><v>0</v></c></row>`+
+		`</sheetData></worksheet>`, NameSpaceSpreadSheet.Value))
+	f.Pkg.Store(defaultXMLPathSharedStrings, fmt.Appendf(nil,
+		`<sst xmlns="%s" count="1" uniqueCount="1"><si><t>shared</t></si></sst>`, NameSpaceSpreadSheet.Value))
+	f.checked = sync.Map{}
+
+	expectedTypes := [][]CellType{
+		{CellTypeBool, CellTypeDate, CellTypeNumber, CellTypeError, CellTypeSharedString, CellTypeFormula, CellTypeInlineString, CellTypeUnset},
+		{CellTypeUnset, CellTypeUnset, CellTypeSharedString},
+	}
+
+	// Stream the worksheet and collect values and cell types row by row
+	rows, err := f.Rows("Sheet1")
+	require.NoError(t, err)
+	var (
+		streamedValues [][]string
+		streamedTypes  [][]CellType
+	)
+	for rows.Next() {
+		values, types, err := rows.ColumnsWithTypes()
+		require.NoError(t, err)
+		require.Len(t, types, len(values))
+		streamedValues = append(streamedValues, values)
+		streamedTypes = append(streamedTypes, types)
+	}
+	require.NoError(t, rows.Error())
+	require.NoError(t, rows.Close())
+	require.Equal(t, expectedTypes, streamedTypes)
+
+	// The streaming values must match the Columns result exactly
+	rows, err = f.Rows("Sheet1")
+	require.NoError(t, err)
+	var columnValues [][]string
+	for rows.Next() {
+		values, err := rows.Columns()
+		require.NoError(t, err)
+		columnValues = append(columnValues, values)
+	}
+	require.NoError(t, rows.Error())
+	require.NoError(t, rows.Close())
+	require.Equal(t, columnValues, streamedValues)
+
+	// The streaming cell types must be consistent with GetCellType cell by cell
+	for rowIdx, rowTypes := range streamedTypes {
+		for colIdx, cellType := range rowTypes {
+			cell, err := CoordinatesToCellName(colIdx+1, rowIdx+1)
+			require.NoError(t, err)
+			expected, err := f.GetCellType("Sheet1", cell)
+			require.NoError(t, err)
+			require.Equal(t, expected, cellType, "cell %s", cell)
+		}
+	}
+	require.NoError(t, f.Close())
+}

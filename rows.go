@@ -159,14 +159,31 @@ func (rows *Rows) Close() error {
 // data as a stream, returns each cell in a row as is, and will not skip empty
 // rows in the tail of the worksheet.
 func (rows *Rows) Columns(opts ...Options) ([]string, error) {
+	cells, _, err := rows.columns(opts...)
+	return cells, err
+}
+
+// ColumnsWithTypes return the current row's column values and the cell data
+// types of each column. This fetches the worksheet data as a stream, returns
+// each cell in a row as is, and will not skip empty rows in the tail of the
+// worksheet. The returned cell types are aligned with the returned column
+// values, blank cells in the row are filled with CellTypeUnset, and the cell
+// types are consistent with the result of the GetCellType function.
+func (rows *Rows) ColumnsWithTypes(opts ...Options) ([]string, []CellType, error) {
+	return rows.columns(opts...)
+}
+
+// columns return the current row's column values and cell types by streaming
+// reading the worksheet data.
+func (rows *Rows) columns(opts ...Options) ([]string, []CellType, error) {
 	if rows.curRow > rows.seekRow {
-		return nil, nil
+		return nil, nil, nil
 	}
 	var rowIterator rowXMLIterator
 	var token xml.Token
 	rows.rawCellValue = rows.f.getOptions(opts...).RawCellValue
 	if rows.sst, rowIterator.err = rows.f.sharedStringsReader(); rowIterator.err != nil {
-		return rowIterator.cells, rowIterator.err
+		return rowIterator.cells, rowIterator.cellTypes, rowIterator.err
 	}
 	for {
 		if rows.token != nil {
@@ -181,7 +198,7 @@ func (rows *Rows) Columns(opts ...Options) ([]string, error) {
 				rowNum := 0
 				if rowNum, rowIterator.err = attrValToInt("r", xmlElement.Attr); rowNum > TotalRows {
 					rows.err, rows.token = ErrMaxRows, nil
-					return rowIterator.cells, rows.err
+					return rowIterator.cells, rowIterator.cellTypes, rows.err
 				} else if rowNum != 0 {
 					rows.curRow = rowNum
 				} else if rows.token == nil {
@@ -191,21 +208,21 @@ func (rows *Rows) Columns(opts ...Options) ([]string, error) {
 				rows.seekRowOpts = extractRowOpts(xmlElement.Attr)
 				if rows.curRow > rows.seekRow {
 					rows.token = nil
-					return rowIterator.cells, rowIterator.err
+					return rowIterator.cells, rowIterator.cellTypes, rowIterator.err
 				}
 			}
 			if rows.rowXMLHandler(&rowIterator, &xmlElement, rows.rawCellValue); rowIterator.err != nil {
 				rows.token = nil
-				return rowIterator.cells, rowIterator.err
+				return rowIterator.cells, rowIterator.cellTypes, rowIterator.err
 			}
 			rows.token = nil
 		case xml.EndElement:
 			if xmlElement.Name.Local == "sheetData" {
-				return rowIterator.cells, rowIterator.err
+				return rowIterator.cells, rowIterator.cellTypes, rowIterator.err
 			}
 		}
 	}
-	return rowIterator.cells, rowIterator.err
+	return rowIterator.cells, rowIterator.cellTypes, rowIterator.err
 }
 
 // extractRowOpts extract row element attributes.
@@ -223,10 +240,10 @@ func extractRowOpts(attrs []xml.Attr) RowOpts {
 	return rowOpts
 }
 
-// appendSpace append blank characters to slice by given length and source slice.
-func appendSpace(l int, s []string) []string {
+// appendSpace append zero values to slice by given length and source slice.
+func appendSpace[T any](l int, s []T) []T {
 	for i := 1; i < l; i++ {
-		s = append(s, "")
+		s = append(s, *new(T))
 	}
 	return s
 }
@@ -237,6 +254,7 @@ type rowXMLIterator struct {
 	inElement        string
 	cellCol, cellRow int
 	cells            []string
+	cellTypes        []CellType
 }
 
 // rowXMLHandler parse the row XML element of the worksheet.
@@ -253,6 +271,7 @@ func (rows *Rows) rowXMLHandler(rowIterator *rowXMLIterator, xmlElement *xml.Sta
 		blank := rowIterator.cellCol - len(rowIterator.cells)
 		if val, _ := colCell.getValueFrom(rows.f, rows.sst, raw); val != "" || colCell.F != nil {
 			rowIterator.cells = append(appendSpace(blank, rowIterator.cells), val)
+			rowIterator.cellTypes = append(appendSpace(blank, rowIterator.cellTypes), cellTypes[colCell.T])
 		}
 	}
 }
